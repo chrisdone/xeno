@@ -4,8 +4,9 @@
 {-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 -- | DOM parser and API for XML.
-
-module Xeno.DOM
+--   Slightly slower DOM parsing,
+--   but add missing close tags.
+module Xeno.DOM.Robust
   ( parse
   , Node
   , Content(..)
@@ -15,25 +16,23 @@ module Xeno.DOM
   , children
   ) where
 
-import           Control.DeepSeq
 import           Control.Monad.ST
 import           Control.Spork
-import           Data.ByteString          (ByteString)
-import qualified Data.ByteString as S
-import           Data.ByteString.Internal (ByteString(PS))
+import           Data.ByteString.Internal(ByteString(..))
+import qualified Data.ByteString             as S
 import           Data.Data                (Data, Typeable)
-import           Data.Mutable
 import           Data.STRef
 import           Data.Vector.Unboxed      ((!))
-import qualified Data.Vector.Unboxed as UV
+import qualified Data.Vector.Unboxed         as UV
 import qualified Data.Vector.Unboxed.Mutable as UMV
+import           Data.Mutable(asURef, newRef, readRef, writeRef)
 import           Xeno.SAX
 import           Xeno.Types
-import           Xeno.DOM.Internal
+import           Xeno.DOM.Internal(Node(..), Content(..), name, attributes, contents, children)
 
 -- | Parse a complete Nodes document.
 parse :: ByteString -> Either XenoException Node
-parse str =
+parse inp =
   case spork node of
     Left e -> Left e
     Right r ->
@@ -48,14 +47,15 @@ parse str =
           -- skipping text assuming that it contains only white space
           -- characters
           Just 0x1 -> go (n+3)
-          _        -> Nothing
+          _ -> Nothing
     PS _ offset0 _ = str
+    str = skipDoctype inp
     node =
       runST
         (do nil <- UMV.new 1000
-            vecRef <- newSTRef nil
-            sizeRef <- fmap asURef (newRef 0)
-            parentRef <- fmap asURef (newRef 0)
+            vecRef    <- newSTRef nil
+            sizeRef   <- fmap asURef $ newRef 0
+            parentRef <- fmap asURef $ newRef 0
             process
               (\(PS _ name_start name_len) -> do
                  let tag = 0x00
@@ -110,15 +110,25 @@ parse str =
                  do UMV.write v' index tag
                     UMV.write v' (index + 1) (text_start - offset0)
                     UMV.write v' (index + 2) text_len)
-              (\_ -> do
+              (\closeTag@(PS s _ _) -> do
                  v <- readSTRef vecRef
                  -- Set the tag_end slot of the parent.
-                 parent <- readRef parentRef
                  index <- readRef sizeRef
-                 UMV.write v (parent + 4) index
-                 -- Pop the stack and return to the parent element.
-                 previousParent <- UMV.read v (parent + 1)
-                 writeRef parentRef previousParent)
+                 untilM $ do
+                   parent <- readRef parentRef
+                   correctTag <- if parent == 0
+                                    then return True -- no more tags to close!!!
+                                    else do
+                                      parent_name <- UMV.read v (parent + 2)
+                                      parent_len  <- UMV.read v (parent + 3)
+                                      let openTag  = PS s (parent_name+offset0) parent_len
+                                      return       $ openTag == closeTag
+                   UMV.write                  v (parent + 4) index
+                   -- Pop the stack and return to the parent element.
+                   previousParent <- UMV.read v (parent + 1)
+                   writeRef parentRef previousParent
+                   return correctTag -- continue closing tags, until matching one is found
+              )
               (\(PS _ cdata_start cdata_len) -> do
                  let tag = 0x03
                  index <- readRef sizeRef
@@ -139,4 +149,11 @@ parse str =
             arr <- UV.unsafeFreeze wet
             size <- readRef sizeRef
             return (UV.unsafeSlice 0 size arr))
+
+untilM :: Monad m => m Bool -> m ()
+untilM loop = do
+  cond <- loop
+  case cond of
+    True  -> return ()
+    False -> untilM loop
 

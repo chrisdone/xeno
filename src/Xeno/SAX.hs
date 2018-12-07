@@ -10,6 +10,7 @@ module Xeno.SAX
   , fold
   , validate
   , dump
+  , skipDoctype
   ) where
 
 import           Control.Exception
@@ -19,10 +20,13 @@ import           Data.ByteString (ByteString)
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString.Unsafe as SU
+import           Data.Char(isSpace)
 import           Data.Functor.Identity
 import           Data.Monoid
 import           Data.Word
 import           Xeno.Types
+
+import Debug.Trace
 
 --------------------------------------------------------------------------------
 -- Helpful interfaces to the parser
@@ -132,7 +136,8 @@ process openF attrF endOpenF textF closeF cdataF str = findLT 0
       if | s_index this 0 == bangChar -- !
            && s_index this 1 == commentChar -- -
            && s_index this 2 == commentChar -> -- -
-           findCommentEnd (index + 3)
+           trace ("Found comment " <> show (S.take 10 $ S.drop (index-1) str)) $ 
+             findCommentEnd (index + 3)
          | s_index this 0 == bangChar -- !
            && s_index this 1 == openAngleBracketChar -- [
            && s_index this 2 == 67 -- C
@@ -151,8 +156,12 @@ process openF attrF endOpenF textF closeF cdataF str = findLT 0
         Nothing -> throw $ XenoParseError index "Couldn't find the closing comment dash."
         Just fromDash ->
           if s_index this 0 == commentChar && s_index this 1 == closeTagChar
-            then findLT (fromDash + 2)
-            else findCommentEnd (fromDash + 1)
+            then trace ("Closed comment! "   <> show (S.take 10 $ S.drop (index-1)    str )
+                     <> " going for: "       <> show (S.take 10 $ S.drop (fromDash+1) str )) $
+                       findLT (fromDash + 2)
+            else trace ("Unclosed comment: " <> show (S.take 10 $ S.drop (index-1)    str )
+                     <> " going for: "       <> show (S.take 10 $ S.drop  fromDash    str )) $
+                       findCommentEnd (fromDash + 1)
           where this = S.drop index str
     findCDataEnd cdata_start index =
       case elemIndexFrom closeAngleBracketChar str index of
@@ -357,3 +366,19 @@ openAngleBracketChar = 91
 -- | Close angle bracket character.
 closeAngleBracketChar :: Word8
 closeAngleBracketChar = 93
+
+-- | Skip initial DOCTYPE declaration
+skipDoctype :: ByteString -> ByteString
+skipDoctype arg =
+    if "<!DOCTYPE" `S8.isPrefixOf` bs
+      then let (_, rest)=">" `S8.breakSubstring` bs
+           in skipSpaces $ S8.drop 1 rest
+      else bs
+  where
+    bs = skipSpaces arg
+    skipSpaces = S8.dropWhile isSpace
+    {-withoutXML = if "<?" `S8.isPrefixOf` skipSpaces withoutDoctype
+      then let (_, rest)="?>" `S8.breakSubstring` withoutDoctype
+           in skipSpaces $ S8.drop 2 rest
+      else  bs-}
+
